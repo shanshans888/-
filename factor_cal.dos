@@ -161,4 +161,4 @@ update sampledata_M set factor_8 =  factor8 context by instrument;
 
 
 factor_data = select open_time, close, factor_1,factor_2,factor_3,factor_4,factor_5,factor_6,factor_7,factor_8 from sampledata_M order by open_time
-saveText(factor_data, "D:\\study_file\\intern\\Yujin_Private_Equity\\Yujin_Private_Equity\\factor_data.csv")
+saveText(factor_data, "factor_data.csv")
