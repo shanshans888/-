@@ -1,0 +1,164 @@
+start_date = 2017.01.01 
+end_date = 2023.12.30
+Tradingdays = start_date..end_date
+
+sampledata_M = select *,  date(open_time) as settlement_date, open_time as bar_endtime_flag from btc_data 
+update sampledata_M set instrument = 'btc'
+
+// 因子1 
+defg AmplitudeFactor(High, Close) {
+    // 计算每日振幅 (High/Close - 1)
+    daily_amp = High / Close - 1
+    // 选取收盘价前25%和后25%的交易日
+    q_high = quantile(Close, 0.75)
+    q_low = quantile(Close, 0.25)
+    // 计算高低振幅均值差
+    return avg(iif(Close >= q_high, daily_amp, NULL)) - avg(iif(Close <= q_low, daily_amp, NULL))
+}
+
+// 因子2
+def BIAS(Close) {  
+    close_ma = sum(Close)/count(Close) 
+    daily_bias = (Close - close_ma) / close_ma * 100
+    return daily_bias
+}
+
+// 因子3 
+def MACD_Factor(Close) {
+    // 计算12周期和26周期EMA
+    ema12 = ema(Close, 12)
+    ema26 = ema(Close, 26)
+    
+    // 计算MACD线
+    macd_line = ema12 - ema26
+    
+    // 计算信号线(9周期EMA)
+    signal_line = ema(macd_line, 9)
+    
+    // 返回MACD柱状图值
+    return macd_line - signal_line
+}
+update sampledata_M set factor_macd = MACD_Factor(Close) context by instrument;
+
+
+// 因子4
+def Momentum_12H(Close) {
+    return Close / move(Close,120) - 1
+}
+update sampledata_M set mom_12h_factor = Momentum_12H(Close) context by instrument;
+update sampledata_M set mom_12h_factor = (mom_12h_factor - mavg(mom_12h_factor,64))/mstd(mom_12h_factor,64) context by instrument;
+
+// 因子5
+def RSI_Factor(Close) {
+    // 计算价格变化
+    price_change = deltas(Close)
+    
+    // 计算上涨和下跌幅度
+    gain = iif(price_change > 0, price_change, 0.0)
+    loss = iif(price_change < 0, -price_change, 0.0)
+    
+    // 计算平均增益和平均损失(14周期)
+    avg_gain = mavg(gain, 14)
+    avg_loss = mavg(loss, 14)
+    
+    // 计算RS值
+    rs = avg_gain / (avg_loss + 1e-9)  // 避免除以0
+    
+    // 计算RSI (0-100范围)
+    rsi = 100 - (100 / (1 + rs))
+    
+    // 调整RSI为多头利好方向 (值越大表示越利好)
+    return rsi
+}
+
+update sampledata_M set rsi_factor = RSI_Factor(Close) context by instrument;
+update sampledata_M set rsi_factor = (rsi_factor - 50) / 20 context by instrument;  
+
+
+
+// 因子6    蜘蛛网策略因子 
+def SpiderWeb_Factor(Close) {
+    // 计算多周期EMA (3,5,8,13,21,34,55周期)
+    ema3 = ema(Close, 3)
+    ema5 = ema(Close, 5)
+    ema8 = ema(Close, 8) 
+    ema13 = ema(Close, 13)
+    ema21 = ema(Close, 21)
+    ema34 = ema(Close, 34)
+    ema55 = ema(Close, 55)
+    
+    // 计算均线缠绕得分 (多头排列加分，空头排列减分)
+    score = (iif(ema3>ema5,1,0) + iif(ema5>ema8,1,0) + iif(ema8>ema13,1,0) +
+            iif(ema13>ema21,1,0) + iif(ema21>ema34,1,0) + iif(ema34>ema55,1,0) -
+            (iif(ema3<ema5,1,0) + iif(ema5<ema8,1,0) + iif(ema8<ema13,1,0) +
+            iif(ema13<ema21,1,0) + iif(ema21<ema34,1,0) + iif(ema34<ema55,1,0)))
+    
+    // 加入价格相对位置权重
+    position_weight = (Close - ema55) / ema55 * 100
+    return score * (1 + abs(position_weight)/100)
+}
+update sampledata_M set factor_5 = SpiderWeb_Factor(Close) context by instrument;
+
+// 因子7
+// 网格交易法因子 - 基于波动率
+def Grid_Factor(Close, High, Low) {
+    // 计算ATR(14周期)
+    tr = max(High-Low, abs(High-move(Close,1)))
+    tr = max(tr, abs(Low-move(Close,1)))
+    atr = mavg(tr, 14)
+    
+    // 建立网格通道(±2ATR)
+    upper_grid = mavg(Close, 64) + 2*atr
+    lower_grid = mavg(Close, 64) - 2*atr
+    
+    // 计算网格位置得分
+    grid_position = (Close - lower_grid) / (upper_grid - lower_grid) * 2 - 1  // 标准化到[-1,1]
+    
+    // 加入波动率调整
+    volatility_adj = mstd(Close, 14) / mavg(Close, 14)
+    return grid_position / (volatility_adj + 0.1)  // 防止除零
+}
+
+
+
+// 因子8 
+// 增强版VWAP因子
+def Enhanced_VWAP(Close, Volume, High, Low) {
+    // 计算标准VWAP
+    typical_price = (High + Low + Close) / 3
+    vwap = cumsum(typical_price * Volume) / cumsum(Volume)
+    
+    // 计算成交量趋势
+    volume_trend = Volume / mavg(Volume, 20)
+    
+    // 计算价格偏离强度
+    price_dev = (Close - vwap) / vwap
+    
+    // 计算二阶导数(加速度)
+    vwap_derivative = deltas(vwap) / vwap
+    vwap_acceleration = deltas(vwap_derivative)
+    
+    // 综合因子
+    return price_dev * volume_trend * (1 + vwap_acceleration*10)
+}
+
+// 生成增强版VWAP因子
+update sampledata_M set factor8 = Enhanced_VWAP(Close, Volume, High, Low) context by instrument;
+// z_score标准化处理
+update sampledata_M set factor8 = (factor8 - mavg(factor8,240)) / mstd(factor8,240) context by instrument;
+
+
+
+// 生成因子值
+update sampledata_M set factor_1 = moving(AmplitudeFactor, [High, Close], 64) context by instrument;
+update sampledata_M  set factor_2 = BIAS(Close) context by instrument;
+update sampledata_M set factor_3 = (factor_macd - mavg(factor_macd,128))/mstd(factor_macd,128) context by instrument;
+update sampledata_M set factor_4 =  mom_12h_factor context by instrument;
+update sampledata_M set factor_5 = rsi_factor context by instrument;  
+update sampledata_M set factor_6 = SpiderWeb_Factor(Close) context by instrument;
+update sampledata_M set factor_7 = Grid_Factor(Close, High, Low)  context by instrument;
+update sampledata_M set factor_8 =  factor8 context by instrument;
+
+
+factor_data = select open_time, close, factor_1,factor_2,factor_3,factor_4,factor_5,factor_6,factor_7,factor_8 from sampledata_M order by open_time
+saveText(factor_data, "D:\\study_file\\intern\\Yujin_Private_Equity\\Yujin_Private_Equity\\factor_data.csv")

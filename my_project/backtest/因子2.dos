@@ -1,0 +1,80 @@
+start_date = 2017.01.01 
+end_date = 2024.12.30
+Tradingdays = start_date..end_date
+
+sampledata_M = select *,  date(open_time) as settlement_date, open_time as bar_endtime_flag from btc_data 
+update sampledata_M set instrument = 'btc'
+
+// 2. 乖离率（传入字段：Close）
+def BIAS(Close) {  
+    close_ma = sum(Close)/count(Close) 
+    daily_bias = (Close - close_ma) / close_ma * 100
+    return daily_bias
+}
+
+update sampledata_M  set factor = BIAS(Close) context by instrument
+// 信号生成逻辑
+update sampledata_M  set factor_val_1 = iif(factor > mavg(factor,240) + mavg(factor,240)*0.1, 1.0, iif(factor < mavg(factor,240)-mavg(factor,240)*0.1, -1.0 ,NULL))context by instrument
+update sampledata_M set factor_val_1 = ffill!(factor_val_1, 48) context by instrument
+update sampledata_M set factor_val_1 = nullFill(factor_val_1, 0.0) context by instrument
+
+factorData = sampledata_M
+update factorData set factor_val3 = nullFill( factor_val_1, 0.0) context by instrument
+update factorData set holdingPnl = (Close)  / move(Close,1) - 1.0 context by instrument
+update factorData set symbolPnl = move(factor_val3, 2) *  holdingPnl
+update factorData set totalPnl = sum(symbolPnl) context by bar_endtime_flag
+update factorData set Position = move(factor_val3, 2) context by instrument
+update factorData set PositionDiff = (move(factor_val3, 1) - move(factor_val3, 2)) context by instrument
+
+
+// 回测
+def stats_perf(perf_summary_daily_, year_){
+    perf_summary_daily = select * from perf_summary_daily_
+    if (year_ == 'all'){
+        update perf_summary_daily set settlement_year = year_
+        // print(perf_summary_daily_)
+    }
+    else{
+        
+        update perf_summary_daily set settlement_year = string(year(settlement_date))
+        perf_summary_daily = select * from perf_summary_daily where settlement_year == (year_)
+    }
+        
+    perf_stats = select string(first(settlement_year)) as year_, count(*) as days,
+    round( iif(size(pnl_d) > 240, sum(pnl_d), mean(pnl_d) * 240) * 100 ,2) as ret, 
+    round(mean(pnl_d) * 365 / (std(pnl_d) * 19), 2)  as sharp, 
+    round( std(pnl_d) * 19 * 100.0, 2)  as std_,
+    round(mean(holding_d)  * 100, 2) as holding,
+    round(max(holdingMax_d)  * 100, 2) as holding_max,
+    round(mean(turnover_d) * 100 , 2) as turnover ,
+    round(mean(position_net_d) * 100 , 2) as position_net ,
+    round(mean(pnl_d) / mean(turnover_d)  * 10000, 2) as "margin(bps)"
+    from perf_summary_daily
+    
+    update perf_stats set ture_tr =round( (turnover / holding) * 100 , 2) , ture_position_net =  round(position_net / holding * 100 , 2)
+    
+    return perf_stats
+}
+
+
+perf_summary_hour  = select 
+sum(nullFill(symbolPnl,0.0)) as pnl_h, 
+sum(nullFill(abs(Position),0)) as holding_h,
+sum(nullFill(abs(PositionDiff),0)) as turnover_h ,
+sum(nullFill(iif(Position > 0, abs(Position) ,0 ),0)) -  sum(nullFill(iif(Position < 0,  abs(Position) ,0 ),0))  as position_net_h
+from factorData  group by bar_endtime_flag ,settlement_date
+perf_summary_d  = select 
+sum(pnl_h) as pnl_d, 
+mean(abs(holding_h)) as holding_d, 
+max(abs(holding_h)) as holdingMax_d, 
+sum(abs(turnover_h)) as turnover_d,
+mean(position_net_h) as position_net_d  from perf_summary_hour  group by settlement_date 
+stats_all = loop(stats_perf{perf_summary_d,},append!(string(sort(distinct(year(Tradingdays)))),'all'))
+
+//统计结果
+stats_all = stats_all.unionAll(false)
+
+// pnl画图
+myPnl = select  sum(symbolPnl) as pnl, last(settlement_date) as settlement_date from factorData group by bar_endtime_flag order by bar_endtime_flag
+update myPnl set cumpnl = cumsum(pnl)  
+plot(myPnl.cumpnl, myPnl.bar_endtime_flag)
